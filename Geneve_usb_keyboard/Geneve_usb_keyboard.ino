@@ -25,16 +25,30 @@
  * DEBUG OPTIONS
  */
 //#define DEBUG_SERIAL			//Serial debugger over USB
+#define DEBUG_SERIAL			//Serial debugger over USB
+
+// Debug everything?
+#define DEBUG_KEYBOARD_ALL
+
+// Wait for serial to be ready
+#define WAIT_FOR_SERIAL false
+
+//#define DEBUG_MISC      //Miscelaneous debug
+//#define DEBUG_USB_KB_READ   //USB KeayBoard Read
+//#define DEBUG_USB_TO_XT   //USB to XT conversion
+//#define DEBUG_USB_CAPSLCK   //Capslock on/ off
+//#define DEBUG_USB_NUMLCK    //Numlock on /off
+//#define DEBUG_USB_SP_KM   //SPecial Keyboard Mode
 
 #if defined DEBUG_SERIAL
-
-//#define DEBUG_MISC			//Miscelaneous debug
-//#define DEBUG_USB_KB_READ		//USB KeayBoard Read
-//#define DEBUG_USB_TO_XT		//USB to XT conversion
-//#define DEBUG_USB_CAPSLCK		//Capslock on/ off
-//#define DEBUG_USB_NUMLCK		//Numlock on /off
-//#define DEBUG_USB_SP_KM		//SPecial Keyboard Mode
-
+#if defined DEBUG_KEYBOARD_ALL
+#define DEBUG_MISC			//Miscelaneous debug
+#define DEBUG_USB_KB_READ		//USB KeayBoard Read
+#define DEBUG_USB_TO_XT		//USB to XT conversion
+#define DEBUG_USB_CAPSLCK		//Capslock on/ off
+#define DEBUG_USB_NUMLCK		//Numlock on /off
+#define DEBUG_USB_SP_KM		//SPecial Keyboard Mode
+#endif
 #endif
 
 
@@ -46,7 +60,9 @@
 #include "xt_conv_table.h"
 #include "basic_table.h"
 #include "mdos_table.h"
-
+#include "DebugSerial.h"
+#include "DebugSPI.h"
+#include "teensy_reboot_support.h"
 
 #ifndef _delay_us
 #define _delay_us(n) delayMicroseconds(n)
@@ -1182,8 +1198,8 @@ static void Xt_AutoRepeat(void)
  * MAIN PROGRAM
  */
 USB     Usb;
-//USBHub     Hub(&Usb);
-HIDBoot<HID_PROTOCOL_KEYBOARD>    HidKeyboard(&Usb);
+USBHub     Hub(&Usb);
+HIDBoot<USB_HID_PROTOCOL_KEYBOARD>    HidKeyboard(&Usb);
 
 //uint32_t next_time;
 
@@ -1193,54 +1209,102 @@ KbdRptParser Prs;
 #define MAX_RESET 7 //MAX3421E pin 12
 #define MAX_GPX   8 //MAX3421E pin 17
 
-
-void setup()
+void resetUSBChip()
 {
-#if defined DEBUG_SERIAL
- 	Serial.begin( 115200 );
-#if !defined(__MIPSEL__)
-  	while (!Serial); // Wait for serial port to connect - used on Leonardo, Teensy and other boards with built-in USB CDC serial connection
-#endif
-	Serial.println("Start");
-#endif
-	
 	pinMode(MAX_GPX, INPUT);
 	pinMode(MAX_RESET, OUTPUT);
-	
-	pinMode(XT_CLCK,  OUTPUT);
-	pinMode(XT_DATA,  OUTPUT);
-	pinMode(XT_RESET, INPUT_PULLUP);
-	
-	SBO(XT_CLCK);
-	SBO(XT_DATA);
-	
+
 	digitalWrite(MAX_RESET, LOW);
 	_delay_ms(20);
 	digitalWrite(MAX_RESET, HIGH);
 	_delay_ms(20);
+}
 
-	Xt_Write_Byte(0xAA);	//Keyboard powered on with no errors
-	_delay_ms(500);
+void initUSB()
+{
+	long USBInitTime = millis();
+	const long USBMaxInitTime = 2000;
 
-	if (Usb.Init() == -1)
+	DEBUG_PRINTLN("Usb.Init");
+	// Wait for keyboard to be up
+	while (Usb.Init() == -1 && USBInitTime < USBMaxInitTime) USBInitTime = millis();
+
+	if (USBInitTime >= USBMaxInitTime)
 	{
 #if defined DEBUG_MISC
 		Serial.println("OSC did not start.");
 #endif
 	}
-	_delay_ms(200);
+	//_delay_ms(200);
+}
+
+void setup()
+{
+	setup_debug_serial();
+
+	DEBUG_PRINTLN("Start setup");
+
+	debug_print_SPI_parameters();
+
+	resetUSBChip();
+
+	pinMode(XT_CLCK,  OUTPUT);
+	pinMode(XT_DATA,  OUTPUT);
+	pinMode(XT_RESET, INPUT_PULLUP);
+
+	SBO(XT_CLCK);
+	SBO(XT_DATA);
+
+	Xt_Write_Byte(0xAA);	//Keyboard powered on with no errors
+	//_delay_ms(500);
+
+	initUSB();
+	//_delay_ms(200);
 
 //	next_time = millis() + 5000;
 
+	DEBUG_PRINTLN("SetReportParser");
 	HidKeyboard.SetReportParser(0, (HIDReportParser*)&Prs);
+	DEBUG_PRINT("End setup(ms)=");
+	DEBUG_PRINTLN(millis());
 }
 
 void loop()
 {
-	
+	static bool firstBoot = true;
+	static long lastGoodState = 0;
+	long loopMillis = millis();
+
 	Usb.Task();
 	Xt_AutoRepeat();
+
+	uint8_t state = Usb.getUsbTaskState();
 	
+	if (state != USB_STATE_RUNNING || !HidKeyboard.isReady())
+	{
+		if ((loopMillis - lastGoodState) >= 5000)
+		{
+			// Keyboard removed
+			DEBUG_PRINT("HidKeyboard.isReady()=false, keyboard removed, millis()=");
+			DEBUG_PRINTLN(millis());
+			DEBUG_PRINTLN("CPU_RESTART");
+			// Delay, to see reboot message on serial port
+			DEBUG_DELAYMS(1000);
+			CPU_RESTART;
+		}
+		// next loop, try again!
+		return;
+	}
+
+	lastGoodState = loopMillis;
+
+	if (firstBoot)
+	{
+		firstBoot = false;
+		DEBUG_PRINT("RunningMode=RM_ACTIVE, millis()=");
+		DEBUG_PRINTLN(millis());
+	}
+
 	if ((TB(XT_RESET) == LOW) && XtReset)
 	{
 		XtCapsl = FALSE;
